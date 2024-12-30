@@ -1,117 +1,105 @@
-import json
 import os
+import json
 import socket
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse
 from datetime import datetime
-
-os.chdir(r"D:\user\vladi\.vscode\goit-pyweb-hw-04")
-print("Current working directory:", os.getcwd())
-print("Static files path:", os.path.abspath("static"))
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+HTTP_PORT = 3000
+SOCKET_PORT = 5000
+DATA_FILE = os.path.join("storage", "data.json")
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+
+class CustomHTTPRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/":
-            self.send_html_page("index.html")
+            self.path = "/index.html"
         elif self.path == "/message.html":
-            self.send_html_page("message.html")
-        elif self.path == "/error.html":
-            self.send_html_page("error.html")
-        elif self.path.startswith("/static/"):
-            self.send_static_file(self.path[7:])
+            self.path = "/message.html"
+        elif self.path.startswith("/static"):
+            self.path = self.path[1:]
         else:
-            self.send_error(404, "Page not found")
+            self.path = "/error.html"
+        
+        super().do_GET()
 
     def do_POST(self):
         if self.path == "/message":
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
+            fields = self.parse_form_data(post_data)
 
-            form_data = post_data.decode().split('&')
-            username = form_data[0].split('=')[1]
-            message = form_data[1].split('=')[1]
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            server_address = ('localhost', 5000)
-            message_data = f"{username}|{message}"
-            sock.sendto(message_data.encode(), server_address)
-            sock.close()
-
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html')
-            self.end_headers()
-            self.wfile.write(b'Form submitted successfully!')
-
-    def send_html_page(self, filename):
-        try:
-            with open(f"templates/{filename}", "r") as f:
-                html_content = f.read()
             
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html')
+            if not self.validate_form(fields):
+                self.send_error(400, "Bad Request: Missing required fields or invalid data")
+                return
+
+            self.send_to_socket(fields)
+            self.send_response(302)  
+            self.send_header("Location", "/")
             self.end_headers()
-            self.wfile.write(html_content.encode())
-        except FileNotFoundError:
-            self.send_error(404, "File not found")
 
-    def send_static_file(self, filename):
-        try:
-            with open(f"static/{filename}", "rb") as f:
-                content = f.read()
-            
-            if filename.endswith(".css"):
-                content_type = 'text/css'
-            elif filename.endswith(".png"):
-                content_type = 'image/png'
-            else:
-                content_type = 'application/octet-stream'
+    def parse_form_data(self, data):
+        decoded = data.decode("utf-8")
+        return dict(item.split("=") for item in decoded.split("&"))
 
-            self.send_response(200)
-            self.send_header('Content-type', content_type)
-            self.end_headers()
-            self.wfile.write(content)
-        except FileNotFoundError:
-            self.send_error(404, "File not found")
+    def validate_form(self, fields):
+        required_fields = ["username", "message"]
+        if not all(field in fields for field in required_fields):
+            return False
+        if any(char in fields.get("username", "") for char in ['<', '>', '{', '}', '"']):
+            return False
+        return True
 
+    def send_to_socket(self, fields):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(json.dumps(fields).encode("utf-8"), ("127.0.0.1", SOCKET_PORT))
 
 def socket_server():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(('localhost', 5000))
-    print("Socket server started on port 5000")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
+        server.bind(("127.0.0.1", SOCKET_PORT))
+        print(f"Socket server running on port {SOCKET_PORT}")
 
-    while True:
-        data, address = sock.recvfrom(4096)
-        if data:
-            username, message = data.decode().split('|')
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-            new_message = {timestamp: {"username": username, "message": message}}
+        while True:
+            data, _ = server.recvfrom(1024)
+            message = json.loads(data.decode("utf-8"))
 
-            try:
-                with open("storage/data.json", "r") as f:
-                    messages = json.load(f)
-            except FileNotFoundError:
-                messages = {}
+            timestamp = datetime.now().isoformat()
+            entry = {timestamp: message}
 
-            messages.update(new_message)
-            
-            with open("storage/data.json", "w") as f:
-                json.dump(messages, f, indent=4)
-            
-            print(f"Message saved: {new_message}")
+            if os.path.exists(DATA_FILE):
+                with open(DATA_FILE, "r", encoding="utf-8") as file:
+                    existing_data = json.load(file)
+            else:
+                existing_data = {}
+
+            existing_data.update(entry)
+
+            with open(DATA_FILE, "w", encoding="utf-8") as file:
+                json.dump(existing_data, file, indent=4, ensure_ascii=False)
 
 
-def run_http_server():
-    server_address = ('', 3000)
-    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
-    print("HTTP server started on port 3000")
+def http_server():
+    os.chdir(STATIC_DIR)
+    handler = CustomHTTPRequestHandler
+    httpd = HTTPServer(("127.0.0.1", HTTP_PORT), handler)
+    print(f"HTTP server running on port {HTTP_PORT}")
     httpd.serve_forever()
 
 
-if __name__ == "__main__":
-    http_thread = threading.Thread(target=run_http_server)
-    http_thread.start()
+def main():
+    threading.Thread(target=http_server, daemon=True).start()
+    threading.Thread(target=socket_server, daemon=True).start()
 
-    socket_thread = threading.Thread(target=socket_server)
-    socket_thread.start()
+    try:
+        while True:
+            pass  
+    except KeyboardInterrupt:
+        print("\nShutting down servers...")
+
+if __name__ == "__main__":
+    main()
